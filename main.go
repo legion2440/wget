@@ -30,7 +30,7 @@ func run(ctx context.Context, args []string) error {
 		if err := background.Start(args); err != nil {
 			return err
 		}
-		fmt.Println(`Output will be written to "wget-log".`)
+		fmt.Println("Output will be written to \"wget-log\".")
 		return nil
 	}
 
