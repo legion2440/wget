@@ -23,7 +23,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if opts.Background || opts.InputFile != "" || opts.Mirror {
+	if opts.Background || opts.Mirror {
 		return fmt.Errorf("requested mode is not available in this build")
 	}
 	rate, err := download.ParseRate(opts.RateLimit)
@@ -31,12 +31,11 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	client := &http.Client{Timeout: 30 * time.Minute}
+	downloadOpts := download.Options{OutputName: opts.OutputName, OutputDir: opts.OutputDir, RateLimit: rate, ShowProgress: true}
+	if opts.InputFile != "" {
+		return download.Batch(ctx, client, os.Stdout, opts.InputFile, downloadOpts)
+	}
 	d := download.New(client, os.Stdout)
-	_, err = d.Fetch(ctx, opts.URL, download.Options{
-		OutputName:   opts.OutputName,
-		OutputDir:    opts.OutputDir,
-		RateLimit:    rate,
-		ShowProgress: true,
-	})
+	_, err = d.Fetch(ctx, opts.URL, downloadOpts)
 	return err
 }
