@@ -1,0 +1,5 @@
+/wget
+/wget.exe
+/wget-log
+*.tmp
+.DS_Store
