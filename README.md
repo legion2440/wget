@@ -148,37 +148,45 @@ References in downloaded HTML and CSS are converted to relative local paths. Ext
 
 ## 🧪 Tests and verification
 
-Run all automated tests:
+For the evaluator, the shortest automated path is one command:
 
 ```bash
-go test ./... -v
+make audit
 ```
 
-Additional checks:
+It checks formatting, runs `go vet`, executes the full unit and black-box test suite, and performs a final production build. The black-box tests compile the real `wget` binary and invoke it as a CLI against deterministic local HTTP servers, so they verify user-visible behavior rather than only internal functions.
+
+Plain Go tests are also sufficient for the functional automated suite:
+
+```bash
+go test ./... -count=1 -v
+```
+
+The automated audit covers:
+
+- normal file download and downloaded content;
+- start/end timestamp format, HTTP status, content length, destination and 100% progress output;
+- `-O` together with `-P`;
+- actual `300k` rate throttling by elapsed transfer time;
+- concurrent `-i` downloads using deliberately delayed endpoints;
+- `-B`, detached completion and the required `wget-log` structure;
+- non-`200 OK` handling without leaving a false completed file;
+- recursive website mirroring;
+- `--convert-links` with HTML, CSS, image and JavaScript resources;
+- `--reject=gif`;
+- `-X=/img`.
+
+The lower-level tests additionally cover assignment CLI syntax, redirects, rate parsing for `300k`, `700k`, `2M` and `1.5M`, partial batch failures, exclusion boundaries and HTML/CSS link handling.
+
+Useful individual checks:
 
 ```bash
 go test -race ./...
 go vet ./...
-gofmt -l main.go internal
 go build -o wget .
 ```
 
-`gofmt -l` should print nothing.
-
-The tests use deterministic local `httptest` servers and cover:
-
-- assignment CLI syntax;
-- ordinary downloads and `-O`;
-- redirects and HTTP failures;
-- rate parsing and pacing;
-- concurrent `-i` downloads;
-- keeping successful batch downloads when one URL fails;
-- recursive mirror traversal;
-- `--reject` and `--exclude`;
-- exclusion directory boundaries;
-- HTML and CSS link conversion.
-
-The background implementation is split by Go build tags. Windows cross-compilation can be checked with:
+Windows cross-compilation can be checked with:
 
 ```bash
 GOOS=windows GOARCH=amd64 go build -o wget.exe .
@@ -186,7 +194,9 @@ GOOS=windows GOARCH=amd64 go build -o wget.exe .
 
 ## 📋 Audit commands
 
-Build once:
+`make audit` automates everything that can be tested deterministically without relying on third-party websites. The official checklist also asks the evaluator to try live public URLs; those remain manual because the sites can disappear or change independently of this project.
+
+Build once for the live checks:
 
 ```bash
 go build -o wget .
@@ -250,8 +260,10 @@ wget/
 │       ├── mirror_test.go
 │       └── path.go
 ├── .gitignore
+├── Makefile
 ├── README.md
 ├── README_RU.md
+├── audit_test.go
 ├── go.mod
 └── main.go
 ```
