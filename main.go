@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"wget/internal/background"
 	"wget/internal/cli"
 	"wget/internal/download"
 )
@@ -23,7 +24,14 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if opts.Background || opts.Mirror {
+	if opts.Background && !opts.BackgroundChild {
+		if err := background.Start(args); err != nil {
+			return err
+		}
+		fmt.Println(`Output will be written to "wget-log".`)
+		return nil
+	}
+	if opts.Mirror {
 		return fmt.Errorf("requested mode is not available in this build")
 	}
 	rate, err := download.ParseRate(opts.RateLimit)
@@ -31,7 +39,7 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	client := &http.Client{Timeout: 30 * time.Minute}
-	downloadOpts := download.Options{OutputName: opts.OutputName, OutputDir: opts.OutputDir, RateLimit: rate, ShowProgress: true}
+	downloadOpts := download.Options{OutputName: opts.OutputName, OutputDir: opts.OutputDir, RateLimit: rate, ShowProgress: !opts.BackgroundChild}
 	if opts.InputFile != "" {
 		return download.Batch(ctx, client, os.Stdout, opts.InputFile, downloadOpts)
 	}
