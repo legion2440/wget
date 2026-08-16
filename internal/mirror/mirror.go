@@ -10,27 +10,35 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
-// Options controls website mirroring.
+const defaultWorkers = 8
+
 type Options struct {
 	Reject       []string
 	Exclude      []string
 	ConvertLinks bool
 	BaseDir      string
+	Workers      int
 }
 
-// Mirrorer recursively stores same-site pages and resources.
 type Mirrorer struct {
 	client       *http.Client
 	out          io.Writer
 	opts         Options
-	visited      map[string]struct{}
 	allowedHosts map[string]struct{}
 	reject       map[string]struct{}
 	exclude      []string
 	rootDir      string
+	outMu        sync.Mutex
+}
+
+type crawlResult struct {
+	target *url.URL
+	links  []*url.URL
+	err    error
 }
 
 func New(client *http.Client, out io.Writer, opts Options) *Mirrorer {
@@ -40,14 +48,7 @@ func New(client *http.Client, out io.Writer, opts Options) *Mirrorer {
 	if out == nil {
 		out = io.Discard
 	}
-	m := &Mirrorer{
-		client:       client,
-		out:          out,
-		opts:         opts,
-		visited:      make(map[string]struct{}),
-		allowedHosts: make(map[string]struct{}),
-		reject:       make(map[string]struct{}),
-	}
+	m := &Mirrorer{client: client, out: out, opts: opts, allowedHosts: make(map[string]struct{}), reject: make(map[string]struct{})}
 	for _, suffix := range opts.Reject {
 		suffix = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(suffix, ".")))
 		if suffix != "" {
@@ -67,7 +68,6 @@ func New(client *http.Client, out io.Writer, opts Options) *Mirrorer {
 	return m
 }
 
-// Run mirrors one website into a folder named after the requested host.
 func (m *Mirrorer) Run(ctx context.Context, rawURL string) error {
 	root, err := url.Parse(rawURL)
 	if err != nil || root.Scheme == "" || root.Host == "" {
@@ -78,8 +78,10 @@ func (m *Mirrorer) Run(ctx context.Context, rawURL string) error {
 	}
 	root.Fragment = ""
 	m.allowedHosts[strings.ToLower(root.Host)] = struct{}{}
-
-	base := m.opts.BaseDir
+	base, err := expandBaseDir(m.opts.BaseDir)
+	if err != nil {
+		return err
+	}
 	if base == "" {
 		base = "."
 	}
@@ -87,117 +89,211 @@ func (m *Mirrorer) Run(ctx context.Context, rawURL string) error {
 	if err := os.MkdirAll(m.rootDir, 0o755); err != nil {
 		return fmt.Errorf("create mirror directory: %w", err)
 	}
-	fmt.Fprintf(m.out, "mirroring %s to %s\n", rawURL, m.rootDir)
-	if err := m.crawl(ctx, root, true); err != nil {
+	m.logf("mirroring %s to %s\n", rawURL, m.rootDir)
+
+	links, err := m.fetchOne(ctx, root, true)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(m.out, "mirror finished: %s\n", m.rootDir)
+	if err := m.crawlConcurrent(ctx, root, links); err != nil {
+		return err
+	}
+	m.logf("mirror finished: %s\n", m.rootDir)
 	return nil
 }
 
-func (m *Mirrorer) crawl(ctx context.Context, target *url.URL, root bool) error {
+func (m *Mirrorer) crawlConcurrent(ctx context.Context, root *url.URL, initial []*url.URL) error {
+	workers := m.opts.Workers
+	if workers <= 0 {
+		workers = defaultWorkers
+	}
+	jobs := make(chan *url.URL)
+	results := make(chan crawlResult, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for target := range jobs {
+				links, err := m.fetchOne(ctx, target, false)
+				results <- crawlResult{target: target, links: links, err: err}
+			}
+		}()
+	}
+
+	scheduled := map[string]struct{}{canonicalKey(root): {}}
+	queue := make([]*url.URL, 0, len(initial))
+	enqueue := func(items []*url.URL) {
+		for _, u := range items {
+			if u == nil || !m.isAllowed(u) || m.shouldSkip(u) {
+				continue
+			}
+			key := canonicalKey(u)
+			if _, ok := scheduled[key]; ok {
+				continue
+			}
+			scheduled[key] = struct{}{}
+			queue = append(queue, u)
+		}
+	}
+	enqueue(initial)
+	active := 0
+	for len(queue) > 0 || active > 0 {
+		var send chan *url.URL
+		var next *url.URL
+		if len(queue) > 0 && active < workers {
+			send = jobs
+			next = queue[0]
+		}
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return ctx.Err()
+		case send <- next:
+			queue = queue[1:]
+			active++
+		case result := <-results:
+			active--
+			if result.err != nil {
+				m.logf("skip %s: %v\n", result.target, result.err)
+				continue
+			}
+			enqueue(result.links)
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	return nil
+}
+
+func (m *Mirrorer) fetchOne(ctx context.Context, target *url.URL, root bool) ([]*url.URL, error) {
 	if target == nil {
-		return nil
+		return nil, nil
 	}
 	target = cloneURL(target)
 	target.Fragment = ""
 	if !m.isAllowed(target) || m.shouldSkip(target) {
-		return nil
+		return nil, nil
 	}
-	key := canonicalKey(target)
-	if _, exists := m.visited[key]; exists {
-		return nil
-	}
-	m.visited[key] = struct{}{}
-
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
-		if root {
-			return err
-		}
-		fmt.Fprintf(m.out, "skip %s: %v\n", target, err)
-		return nil
+		return nil, err
 	}
 	resp, err := m.client.Do(req)
 	if err != nil {
-		if root {
-			return fmt.Errorf("mirror request %s: %w", target, err)
-		}
-		fmt.Fprintf(m.out, "skip %s: %v\n", target, err)
-		return nil
+		return nil, fmt.Errorf("request: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if root && resp.Request != nil && resp.Request.URL != nil {
-		m.allowedHosts[strings.ToLower(resp.Request.URL.Host)] = struct{}{}
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalHost := strings.ToLower(resp.Request.URL.Host)
+		if root {
+			m.allowedHosts[finalHost] = struct{}{}
+		} else {
+			if _, ok := m.allowedHosts[finalHost]; !ok {
+				return nil, fmt.Errorf("redirected outside mirrored host to %s", resp.Request.URL.Host)
+			}
+		}
 	}
 	if resp.StatusCode != http.StatusOK {
-		if root {
-			return fmt.Errorf("mirror root returned %s", resp.Status)
-		}
-		fmt.Fprintf(m.out, "skip %s: status %s\n", target, resp.Status)
-		return nil
+		return nil, fmt.Errorf("status %s", resp.Status)
 	}
 
 	localRel := localPathFor(target)
 	localAbs := filepath.Join(m.rootDir, localRel)
 	if err := os.MkdirAll(filepath.Dir(localAbs), 0o755); err != nil {
-		return fmt.Errorf("create mirror path: %w", err)
+		return nil, fmt.Errorf("create path %s: %w", filepath.Dir(localAbs), err)
 	}
-
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	ext := strings.ToLower(path.Ext(target.Path))
 	baseURL := target
 	if resp.Request != nil && resp.Request.URL != nil {
 		baseURL = resp.Request.URL
 	}
-
 	var links []*url.URL
 	switch {
 	case strings.Contains(contentType, "text/html") || ext == ".html" || ext == ".htm" || (ext == "" && root):
-		data, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return fmt.Errorf("read %s: %w", target, readErr)
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("read body: %w", err)
 		}
-		processed, found, parseErr := m.processHTML(data, baseURL, localRel)
-		if parseErr != nil {
-			return fmt.Errorf("parse %s: %w", target, parseErr)
+		processed, found, err := m.processHTML(data, baseURL, localRel)
+		if err != nil {
+			return nil, fmt.Errorf("parse HTML: %w", err)
 		}
 		links = found
-		if err := os.WriteFile(localAbs, processed, 0o644); err != nil {
-			return fmt.Errorf("save %s: %w", localAbs, err)
+		if err := writeFileAtomic(localAbs, processed); err != nil {
+			return nil, fmt.Errorf("save %s: %w", localAbs, err)
 		}
 	case strings.Contains(contentType, "text/css") || ext == ".css":
-		data, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return fmt.Errorf("read %s: %w", target, readErr)
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("read body: %w", err)
 		}
 		processed, found := m.processCSS(data, baseURL, localRel)
 		links = found
-		if err := os.WriteFile(localAbs, processed, 0o644); err != nil {
-			return fmt.Errorf("save %s: %w", localAbs, err)
+		if err := writeFileAtomic(localAbs, processed); err != nil {
+			return nil, fmt.Errorf("save %s: %w", localAbs, err)
 		}
 	default:
-		file, createErr := os.Create(localAbs)
-		if createErr != nil {
-			return fmt.Errorf("save %s: %w", localAbs, createErr)
-		}
-		_, copyErr := io.Copy(file, resp.Body)
-		closeErr := file.Close()
-		if copyErr != nil {
-			return fmt.Errorf("save %s: %w", localAbs, copyErr)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("close %s: %w", localAbs, closeErr)
+		if err := writeStreamAtomic(localAbs, resp.Body); err != nil {
+			return nil, fmt.Errorf("save %s: %w", localAbs, err)
 		}
 	}
+	m.logf("saved %s\n", localAbs)
+	return links, nil
+}
 
-	fmt.Fprintf(m.out, "saved %s\n", localAbs)
-	for _, link := range links {
-		if err := m.crawl(ctx, link, false); err != nil {
-			return err
-		}
+func writeFileAtomic(destination string, data []byte) error {
+	dir := filepath.Dir(destination)
+	tmp, err := os.CreateTemp(dir, ".wget-mirror-*.tmp")
+	if err != nil {
+		return err
 	}
+	name := tmp.Name()
+	ok := false
+	defer func() {
+		_ = tmp.Close()
+		if !ok {
+			_ = os.Remove(name)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(name, destination); err != nil {
+		return err
+	}
+	ok = true
+	return nil
+}
+func writeStreamAtomic(destination string, r io.Reader) error {
+	dir := filepath.Dir(destination)
+	tmp, err := os.CreateTemp(dir, ".wget-mirror-*.tmp")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	ok := false
+	defer func() {
+		_ = tmp.Close()
+		if !ok {
+			_ = os.Remove(name)
+		}
+	}()
+	if _, err := io.Copy(tmp, r); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(name, destination); err != nil {
+		return err
+	}
+	ok = true
 	return nil
 }
 
@@ -208,10 +304,9 @@ func (m *Mirrorer) isAllowed(u *url.URL) bool {
 	_, ok := m.allowedHosts[strings.ToLower(u.Host)]
 	return ok
 }
-
 func (m *Mirrorer) shouldSkip(u *url.URL) bool {
 	ext := strings.ToLower(strings.TrimPrefix(path.Ext(u.Path), "."))
-	if _, rejected := m.reject[ext]; rejected && ext != "" {
+	if _, ok := m.reject[ext]; ok && ext != "" {
 		return true
 	}
 	cleanPath := path.Clean("/" + u.Path)
@@ -222,20 +317,38 @@ func (m *Mirrorer) shouldSkip(u *url.URL) bool {
 	}
 	return false
 }
-
 func canonicalKey(u *url.URL) string {
 	copy := cloneURL(u)
 	copy.Fragment = ""
 	copy.Host = strings.ToLower(copy.Host)
 	return copy.String()
 }
-
-func cloneURL(u *url.URL) *url.URL {
-	copy := *u
-	return &copy
-}
-
+func cloneURL(u *url.URL) *url.URL { copy := *u; return &copy }
 func sanitizeHost(host string) string {
-	replacer := strings.NewReplacer(":", "_", "/", "_", `\`, "_")
-	return replacer.Replace(host)
+	return strings.NewReplacer(":", "_", "/", "_", `\`, "_").Replace(host)
+}
+func (m *Mirrorer) logf(format string, args ...any) {
+	m.outMu.Lock()
+	defer m.outMu.Unlock()
+	fmt.Fprintf(m.out, format, args...)
+}
+func expandBaseDir(dir string) (string, error) {
+	if dir == "" {
+		return "", nil
+	}
+	if dir == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home directory: %w", err)
+		}
+		return home, nil
+	}
+	if strings.HasPrefix(dir, "~/") || strings.HasPrefix(dir, `~\`) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home directory: %w", err)
+		}
+		return filepath.Join(home, dir[2:]), nil
+	}
+	return dir, nil
 }
