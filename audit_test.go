@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -85,20 +86,39 @@ func TestAuditRateLimit(t *testing.T) {
 	}
 }
 func TestAuditBatchDownloadsConcurrentlyAndCleanly(t *testing.T) {
-	server, _ := newAuditServer(t)
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	payload := bytes.Repeat([]byte("b"), 4096)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := active.Add(1)
+		defer active.Add(-1)
+		for {
+			seen := maxActive.Load()
+			if current <= seen || maxActive.CompareAndSwap(seen, current) {
+				break
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+		w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
 	dir := t.TempDir()
 	input := strings.Join([]string{server.URL + "/batch-a.zip", server.URL + "/batch-b.zip", server.URL + "/batch-c.zip"}, "\n") + "\n"
 	_ = os.WriteFile(filepath.Join(dir, "downloads.txt"), []byte(input), 0o644)
-	started := time.Now()
 	output, err := runAuditCLI(dir, "-i=downloads.txt")
 	if err != nil {
 		t.Fatalf("wget failed: %v\n%s", err, output)
 	}
-	if time.Since(started) >= 800*time.Millisecond {
-		t.Fatalf("batch appears sequential")
+	if maxActive.Load() < 2 {
+		t.Fatalf("batch downloads did not overlap; max concurrent requests = %d", maxActive.Load())
 	}
 	if strings.Contains(output, "sending request") || strings.Contains(output, "start at ") {
 		t.Fatalf("batch output is noisy/interleaved:\n%s", output)
+	}
+	if !strings.HasPrefix(output, "content size: [") || !strings.Contains(strings.SplitN(output, "\n", 2)[0], ", ") {
+		t.Fatalf("batch sizes are not printed first with comma separators:\n%s", output)
 	}
 	for _, name := range []string{"batch-a.zip", "batch-b.zip", "batch-c.zip"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
@@ -109,6 +129,7 @@ func TestAuditBatchDownloadsConcurrentlyAndCleanly(t *testing.T) {
 		}
 	}
 }
+
 func TestAuditBackgroundDownloadAndExactLogShape(t *testing.T) {
 	server, payload := newAuditServer(t)
 	dir := t.TempDir()
@@ -203,13 +224,37 @@ func TestAuditMirrorRejectAndExclude(t *testing.T) {
 		}
 	}
 }
-func TestAuditRejectsIgnoredMirrorFlags(t *testing.T) {
+func TestAuditMirrorRateLimit(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 64*1024)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, `<img src="/r0"><img src="/r1"><img src="/r2"><img src="/r3">`)
+	})
+	for _, p := range []string{"/r0", "/r1", "/r2", "/r3"} {
+		p := p
+		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
+			_, _ = w.Write(payload)
+		})
+	}
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	started := time.Now()
+	output, err := runAuditCLI(t.TempDir(), "--mirror", "--rate-limit=256k", server.URL+"/")
+	if err != nil {
+		t.Fatalf("rate-limited mirror failed: %v\n%s", err, output)
+	}
+	if elapsed := time.Since(started); elapsed < 800*time.Millisecond {
+		t.Fatalf("mirror aggregate rate limit ignored: %v", elapsed)
+	}
+}
+func TestAuditRejectsOutputDocumentWithMirror(t *testing.T) {
 	server, _ := newAuditServer(t)
-	for _, args := range [][]string{{"--mirror", "-O=x", server.URL + "/"}, {"--mirror", "--rate-limit=300k", server.URL + "/"}} {
-		output, err := runAuditCLI(t.TempDir(), args...)
-		if err == nil {
-			t.Fatalf("expected invalid combination for %v:\n%s", args, output)
-		}
+	output, err := runAuditCLI(t.TempDir(), "--mirror", "-O=x", server.URL+"/")
+	if err == nil {
+		t.Fatalf("expected invalid combination:\n%s", output)
 	}
 }
 

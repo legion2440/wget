@@ -1,6 +1,7 @@
 package mirror
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -124,6 +125,97 @@ func TestRejectIsCaseInsensitive(t *testing.T) {
 	m := New(nil, io.Discard, Options{Reject: []string{"GIF"}})
 	if !m.shouldSkip(mustURL(t, "https://example.com/image.GiF")) {
 		t.Fatal("GIF suffix should be case-insensitive")
+	}
+}
+
+func TestLocalPathUsesContentTypeForExtensionlessResources(t *testing.T) {
+	if got := filepath.ToSlash(localPathFor(mustURL(t, "https://example.com/about"), "text/html; charset=utf-8")); got != "about.html" {
+		t.Fatalf("HTML path = %q", got)
+	}
+	if got := filepath.ToSlash(localPathFor(mustURL(t, "https://example.com/logo"), "image/png")); got != "logo.png" {
+		t.Fatalf("PNG path = %q", got)
+	}
+	if got := filepath.ToSlash(localPathFor(mustURL(t, "https://example.com/api/data"), "application/json")); got != "api/data.json" {
+		t.Fatalf("JSON path = %q", got)
+	}
+}
+
+func TestASCIILowerPreservesHTMLByteOffsets(t *testing.T) {
+	input := "İẞK<style>body{background:url('/img/x')}</style><script>document.write(\"<img src='/fake'>\")</script>"
+	lowered := asciiLower(input)
+	if len(lowered) != len(input) {
+		t.Fatalf("asciiLower changed byte length: %d -> %d", len(input), len(lowered))
+	}
+	m := New(nil, io.Discard, Options{ConvertLinks: true})
+	m.allowedHosts["example.com"] = struct{}{}
+	img := mustURL(t, "https://example.com/img/x")
+	m.paths[canonicalKey(img)] = "img/x.png"
+	processed, links, err := m.processHTML([]byte(input), mustURL(t, "https://example.com/"), "index.html", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 || links[0].Path != "/img/x" {
+		t.Fatalf("unexpected links: %#v", links)
+	}
+	if !strings.Contains(string(processed), `url("img/x.png")`) {
+		t.Fatalf("style was not converted correctly: %s", processed)
+	}
+}
+
+func TestMirrorConvertsExtensionlessImageUsingMIME(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, `<img src="/logo">`)
+	})
+	mux.HandleFunc("/logo", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png"))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	base := t.TempDir()
+	m := New(server.Client(), io.Discard, Options{ConvertLinks: true, BaseDir: base, Workers: 2})
+	if err := m.Run(context.Background(), server.URL+"/"); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(base, sanitizeHost(strings.TrimPrefix(server.URL, "http://")))
+	index, err := os.ReadFile(filepath.Join(root, "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(index), `src="logo.png"`) {
+		t.Fatalf("index not converted: %s", index)
+	}
+	if _, err := os.Stat(filepath.Join(root, "logo.png")); err != nil {
+		t.Fatalf("logo.png missing: %v", err)
+	}
+}
+
+func TestMirrorRateLimitIsSharedAcrossWorkers(t *testing.T) {
+	payload := bytes.Repeat([]byte("x"), 64*1024)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, `<img src="/a"><img src="/b"><img src="/c"><img src="/d">`)
+	})
+	for _, p := range []string{"/a", "/b", "/c", "/d"} {
+		p := p
+		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
+			_, _ = w.Write(payload)
+		})
+	}
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	started := time.Now()
+	m := New(server.Client(), io.Discard, Options{BaseDir: t.TempDir(), Workers: 4, RateLimit: 256 * 1024})
+	if err := m.Run(context.Background(), server.URL+"/"); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed < 800*time.Millisecond {
+		t.Fatalf("shared mirror rate limit too fast: %v", elapsed)
 	}
 }
 

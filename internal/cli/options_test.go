@@ -6,13 +6,7 @@ import (
 )
 
 func TestParseAssignmentFlags(t *testing.T) {
-	opts, err := Parse([]string{
-		"--mirror",
-		"--convert-links",
-		"-R=jpg,gif",
-		"-X=/assets,/img",
-		"https://example.com",
-	})
+	opts, err := Parse([]string{"--mirror", "--convert-links", "-R=jpg,gif", "-X=/assets,/img", "https://example.com"})
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
@@ -26,7 +20,6 @@ func TestParseAssignmentFlags(t *testing.T) {
 		t.Fatalf("Exclude = %#v", opts.Exclude)
 	}
 }
-
 func TestParseSupportsSeparatedAndAttachedShortValues(t *testing.T) {
 	opts, err := Parse([]string{"-O", "renamed.zip", "-Pdownloads", "--rate-limit", "300k", "https://example.com/file.zip"})
 	if err != nil {
@@ -36,13 +29,11 @@ func TestParseSupportsSeparatedAndAttachedShortValues(t *testing.T) {
 		t.Fatalf("unexpected options: %+v", opts)
 	}
 }
-
 func TestParseRejectsMirrorOnlyFlagsWithoutMirror(t *testing.T) {
 	if _, err := Parse([]string{"-R=gif", "https://example.com"}); err == nil {
 		t.Fatal("expected an error")
 	}
 }
-
 func TestParseInputFileDoesNotRequireURL(t *testing.T) {
 	opts, err := Parse([]string{"-i=downloads.txt"})
 	if err != nil {
@@ -50,5 +41,14 @@ func TestParseInputFileDoesNotRequireURL(t *testing.T) {
 	}
 	if opts.InputFile != "downloads.txt" {
 		t.Fatalf("InputFile = %q", opts.InputFile)
+	}
+}
+func TestParseAllowsRateLimitWithMirror(t *testing.T) {
+	opts, err := Parse([]string{"--mirror", "--rate-limit=300k", "https://example.com"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if !opts.Mirror || opts.RateLimit != "300k" {
+		t.Fatalf("unexpected options: %+v", opts)
 	}
 }

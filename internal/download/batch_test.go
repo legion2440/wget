@@ -1,6 +1,7 @@
 package download
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -63,5 +64,39 @@ func TestBatchContinuesOtherDownloadsAfterFailure(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "good.bin")); err != nil {
 		t.Fatalf("successful download was lost: %v", err)
+	}
+}
+
+func TestBatchPrintsSizesFirstWithUnknownChunkedLength(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/known.bin", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "3")
+		_, _ = w.Write([]byte("abc"))
+	})
+	mux.HandleFunc("/chunked.bin", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("chunked"))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "downloads.txt")
+	if err := os.WriteFile(input, []byte(server.URL+"/known.bin\n"+server.URL+"/chunked.bin\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Batch(context.Background(), server.Client(), &out, input, Options{OutputDir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	if !strings.HasPrefix(text, "content size: [3, unknown]\n") {
+		t.Fatalf("unexpected output:\n%s", text)
+	}
+	if strings.Index(text, "content size:") > strings.Index(text, "finished ") {
+		t.Fatalf("content sizes must be printed before finished lines:\n%s", text)
 	}
 }
