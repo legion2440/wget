@@ -1,10 +1,8 @@
-.PHONY: audit test vet fmt-check build clean
+.PHONY: audit test race vet fmt-check build clean
 
 BINARY := wget
 
-# One-command evaluator entry point: formatting, static analysis, the complete
-# deterministic unit/black-box audit suite, and a final production build.
-audit: fmt-check vet test build
+audit: fmt-check vet test race build
 	@echo "audit: all automated checks passed"
 
 fmt-check:
@@ -18,6 +16,9 @@ fmt-check:
 
 test:
 	go test ./... -count=1 -v
+
+race:
+	go test -race ./... -count=1
 
 vet:
 	go vet ./...
