@@ -17,12 +17,11 @@ type htmlAttribute struct {
 	hasValue             bool
 }
 
-func (m *Mirrorer) processHTML(data []byte, baseURL *url.URL, currentLocal string) ([]byte, []*url.URL, error) {
+func (m *Mirrorer) processHTML(data []byte, baseURL *url.URL, currentLocal string, convert bool) ([]byte, []*url.URL, error) {
 	text := string(data)
 	var links []*url.URL
 	var replacements []htmlReplacement
-	lower := strings.ToLower(text)
-
+	lower := asciiLower(text)
 	for pos := 0; pos < len(text); {
 		relOpen := strings.IndexByte(text[pos:], '<')
 		if relOpen < 0 {
@@ -46,7 +45,6 @@ func (m *Mirrorer) processHTML(data []byte, baseURL *url.URL, currentLocal strin
 			pos = close + 1
 			continue
 		}
-
 		wanted := ""
 		switch tag {
 		case "a", "link":
@@ -63,24 +61,21 @@ func (m *Mirrorer) processHTML(data []byte, baseURL *url.URL, currentLocal strin
 				resolved := resolveReference(baseURL, raw)
 				if resolved != nil && m.isAllowed(resolved) && !m.shouldSkip(resolved) {
 					links = append(links, resolved)
-					if m.opts.ConvertLinks {
-						converted := relativeLocalLink(currentLocal, localPathFor(resolved))
-						if resolved.Fragment != "" {
-							converted += "#" + resolved.Fragment
+					if convert {
+						if converted, ok := m.convertedLink(currentLocal, resolved); ok {
+							replacements = append(replacements, htmlReplacement{attr.valueStart, attr.valueEnd, converted})
 						}
-						replacements = append(replacements, htmlReplacement{attr.valueStart, attr.valueEnd, converted})
 					}
 				}
 			}
 			if attr.name == "style" {
-				processed, found := m.processCSS([]byte(raw), baseURL, currentLocal)
+				processed, found := m.processCSS([]byte(raw), baseURL, currentLocal, convert)
 				links = append(links, found...)
-				if m.opts.ConvertLinks && string(processed) != raw {
+				if convert && string(processed) != raw {
 					replacements = append(replacements, htmlReplacement{attr.valueStart, attr.valueEnd, html.EscapeString(string(processed))})
 				}
 			}
 		}
-
 		if tag == "script" {
 			if endStart := strings.Index(lower[close+1:], "</script"); endStart >= 0 {
 				endStart += close + 1
@@ -94,9 +89,9 @@ func (m *Mirrorer) processHTML(data []byte, baseURL *url.URL, currentLocal strin
 			if endStart := strings.Index(lower[close+1:], "</style"); endStart >= 0 {
 				endStart += close + 1
 				bodyStart := close + 1
-				processed, found := m.processCSS([]byte(text[bodyStart:endStart]), baseURL, currentLocal)
+				processed, found := m.processCSS([]byte(text[bodyStart:endStart]), baseURL, currentLocal, convert)
 				links = append(links, found...)
-				if m.opts.ConvertLinks && string(processed) != text[bodyStart:endStart] {
+				if convert && string(processed) != text[bodyStart:endStart] {
 					replacements = append(replacements, htmlReplacement{bodyStart, endStart, string(processed)})
 				}
 				if endTag := findTagEnd(text, endStart+2); endTag >= 0 {
@@ -107,7 +102,6 @@ func (m *Mirrorer) processHTML(data []byte, baseURL *url.URL, currentLocal strin
 		}
 		pos = close + 1
 	}
-
 	if len(replacements) == 0 {
 		return data, links, nil
 	}
@@ -126,6 +120,15 @@ func (m *Mirrorer) processHTML(data []byte, baseURL *url.URL, currentLocal strin
 	return []byte(out.String()), links, nil
 }
 
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
+}
 func findTagEnd(text string, start int) int {
 	var quote byte
 	for i := start; i < len(text); i++ {
@@ -146,7 +149,6 @@ func findTagEnd(text string, start int) int {
 	}
 	return -1
 }
-
 func parseTag(text string, start, end int) (string, bool, []htmlAttribute) {
 	i := start
 	for i < end && isHTMLSpace(text[i]) {
@@ -167,7 +169,7 @@ func parseTag(text string, start, end int) (string, bool, []htmlAttribute) {
 	for i < end && isNameChar(text[i]) {
 		i++
 	}
-	tag := strings.ToLower(text[tagStart:i])
+	tag := asciiLower(text[tagStart:i])
 	var attrs []htmlAttribute
 	for i < end {
 		for i < end && (isHTMLSpace(text[i]) || text[i] == '/') {
@@ -184,7 +186,7 @@ func parseTag(text string, start, end int) (string, bool, []htmlAttribute) {
 			i++
 			continue
 		}
-		name := strings.ToLower(text[nameStart:i])
+		name := asciiLower(text[nameStart:i])
 		for i < end && isHTMLSpace(text[i]) {
 			i++
 		}

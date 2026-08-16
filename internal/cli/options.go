@@ -22,14 +22,12 @@ type Options struct {
 func Parse(args []string) (Options, error) {
 	var opts Options
 	var positional []string
-
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
 			positional = append(positional, args[i+1:]...)
 			break
 		}
-
 		switch {
 		case arg == "-B":
 			opts.Background = true
@@ -87,7 +85,6 @@ func Parse(args []string) (Options, error) {
 			positional = append(positional, arg)
 		}
 	}
-
 	if len(positional) > 1 {
 		return Options{}, fmt.Errorf("expected one URL, got %d", len(positional))
 	}
@@ -109,9 +106,6 @@ func Parse(args []string) (Options, error) {
 	if opts.Mirror && opts.OutputName != "" {
 		return Options{}, fmt.Errorf("-O/--output-document cannot be used with --mirror")
 	}
-	if opts.Mirror && opts.RateLimit != "" {
-		return Options{}, fmt.Errorf("--rate-limit cannot be used with --mirror")
-	}
 	return opts, nil
 }
 
@@ -129,17 +123,13 @@ func isValueOption(arg, short, long string) bool {
 	}
 	return false
 }
-
 func optionValue(args []string, index int, arg, short, long string) (string, int, error) {
 	for _, name := range []string{short, long} {
 		if name == "" {
 			continue
 		}
 		if arg == name {
-			if index+1 >= len(args) {
-				return "", index, fmt.Errorf("option %s requires a value", name)
-			}
-			if args[index+1] == "" {
+			if index+1 >= len(args) || args[index+1] == "" {
 				return "", index, fmt.Errorf("option %s requires a non-empty value", name)
 			}
 			return args[index+1], index + 1, nil
@@ -161,14 +151,13 @@ func optionValue(args []string, index int, arg, short, long string) (string, int
 	}
 	return "", index, fmt.Errorf("invalid option %q", arg)
 }
-
 func splitList(value string) []string {
 	parts := strings.Split(value, ",")
 	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			out = append(out, part)
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
 		}
 	}
 	return out

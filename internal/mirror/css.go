@@ -11,17 +11,16 @@ var (
 	cssImportPattern = regexp.MustCompile(`(?i)@import\s+['"]([^'"]+)['"]`)
 )
 
-func (m *Mirrorer) processCSS(data []byte, baseURL *url.URL, currentLocal string) ([]byte, []*url.URL) {
+func (m *Mirrorer) processCSS(data []byte, baseURL *url.URL, currentLocal string, convert bool) ([]byte, []*url.URL) {
 	text := string(data)
 	var links []*url.URL
-	text, first := m.rewriteCSSMatches(text, cssURLPattern, baseURL, currentLocal, "url(\"%s\")")
+	text, first := m.rewriteCSSMatches(text, cssURLPattern, baseURL, currentLocal, `url("%s")`, convert)
 	links = append(links, first...)
-	text, second := m.rewriteCSSMatches(text, cssImportPattern, baseURL, currentLocal, "@import \"%s\"")
+	text, second := m.rewriteCSSMatches(text, cssImportPattern, baseURL, currentLocal, `@import "%s"`, convert)
 	links = append(links, second...)
 	return []byte(text), links
 }
-
-func (m *Mirrorer) rewriteCSSMatches(text string, pattern *regexp.Regexp, baseURL *url.URL, currentLocal, replacementFormat string) (string, []*url.URL) {
+func (m *Mirrorer) rewriteCSSMatches(text string, pattern *regexp.Regexp, baseURL *url.URL, currentLocal, replacementFormat string, convert bool) (string, []*url.URL) {
 	matches := pattern.FindAllStringSubmatchIndex(text, -1)
 	if len(matches) == 0 {
 		return text, nil
@@ -44,12 +43,12 @@ func (m *Mirrorer) rewriteCSSMatches(text string, pattern *regexp.Regexp, baseUR
 			continue
 		}
 		links = append(links, resolved)
-		if !m.opts.ConvertLinks {
+		if !convert {
 			continue
 		}
-		converted := relativeLocalLink(currentLocal, localPathFor(resolved))
-		if resolved.Fragment != "" {
-			converted += "#" + resolved.Fragment
+		converted, ok := m.convertedLink(currentLocal, resolved)
+		if !ok {
+			continue
 		}
 		out.WriteString(text[last:fullStart])
 		out.WriteString(strings.Replace(replacementFormat, "%s", converted, 1))

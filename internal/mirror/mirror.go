@@ -12,9 +12,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"wget/internal/download"
 )
 
-const defaultWorkers = 8
+const defaultWorkers = 4
 
 type Options struct {
 	Reject       []string
@@ -22,6 +24,31 @@ type Options struct {
 	ConvertLinks bool
 	BaseDir      string
 	Workers      int
+	RateLimit    int64
+}
+
+type resourceKind uint8
+
+const (
+	resourceBinary resourceKind = iota
+	resourceHTML
+	resourceCSS
+)
+
+type savedResource struct {
+	key      string
+	localRel string
+	baseURL  *url.URL
+	kind     resourceKind
+}
+type fetchResult struct {
+	links []*url.URL
+	saved *savedResource
+}
+type crawlResult struct {
+	target *url.URL
+	result fetchResult
+	err    error
 }
 
 type Mirrorer struct {
@@ -32,13 +59,11 @@ type Mirrorer struct {
 	reject       map[string]struct{}
 	exclude      []string
 	rootDir      string
+	rootKey      string
 	outMu        sync.Mutex
-}
-
-type crawlResult struct {
-	target *url.URL
-	links  []*url.URL
-	err    error
+	paths        map[string]string
+	saved        []savedResource
+	limiter      *download.RateLimiter
 }
 
 func New(client *http.Client, out io.Writer, opts Options) *Mirrorer {
@@ -48,7 +73,7 @@ func New(client *http.Client, out io.Writer, opts Options) *Mirrorer {
 	if out == nil {
 		out = io.Discard
 	}
-	m := &Mirrorer{client: client, out: out, opts: opts, allowedHosts: make(map[string]struct{}), reject: make(map[string]struct{})}
+	m := &Mirrorer{client: client, out: out, opts: opts, allowedHosts: make(map[string]struct{}), reject: make(map[string]struct{}), paths: make(map[string]string), limiter: download.NewRateLimiter(opts.RateLimit)}
 	for _, suffix := range opts.Reject {
 		suffix = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(suffix, ".")))
 		if suffix != "" {
@@ -77,6 +102,7 @@ func (m *Mirrorer) Run(ctx context.Context, rawURL string) error {
 		return fmt.Errorf("unsupported URL scheme %q", root.Scheme)
 	}
 	root.Fragment = ""
+	m.rootKey = canonicalKey(root)
 	m.allowedHosts[strings.ToLower(root.Host)] = struct{}{}
 	base, err := expandBaseDir(m.opts.BaseDir)
 	if err != nil {
@@ -90,13 +116,18 @@ func (m *Mirrorer) Run(ctx context.Context, rawURL string) error {
 		return fmt.Errorf("create mirror directory: %w", err)
 	}
 	m.logf("mirroring %s to %s\n", rawURL, m.rootDir)
-
-	links, err := m.fetchOne(ctx, root, true)
+	first, err := m.fetchOne(ctx, root, true)
 	if err != nil {
 		return err
 	}
-	if err := m.crawlConcurrent(ctx, root, links); err != nil {
+	m.registerSaved(first.saved)
+	if err := m.crawlConcurrent(ctx, root, first.links); err != nil {
 		return err
+	}
+	if m.opts.ConvertLinks {
+		if err := m.convertSavedResources(); err != nil {
+			return err
+		}
 	}
 	m.logf("mirror finished: %s\n", m.rootDir)
 	return nil
@@ -115,12 +146,11 @@ func (m *Mirrorer) crawlConcurrent(ctx context.Context, root *url.URL, initial [
 		go func() {
 			defer wg.Done()
 			for target := range jobs {
-				links, err := m.fetchOne(ctx, target, false)
-				results <- crawlResult{target: target, links: links, err: err}
+				r, err := m.fetchOne(ctx, target, false)
+				results <- crawlResult{target: target, result: r, err: err}
 			}
 		}()
 	}
-
 	scheduled := map[string]struct{}{canonicalKey(root): {}}
 	queue := make([]*url.URL, 0, len(initial))
 	enqueue := func(items []*url.URL) {
@@ -159,7 +189,8 @@ func (m *Mirrorer) crawlConcurrent(ctx context.Context, root *url.URL, initial [
 				m.logf("skip %s: %v\n", result.target, result.err)
 				continue
 			}
-			enqueue(result.links)
+			m.registerSaved(result.result.saved)
+			enqueue(result.result.links)
 		}
 	}
 	close(jobs)
@@ -167,22 +198,22 @@ func (m *Mirrorer) crawlConcurrent(ctx context.Context, root *url.URL, initial [
 	return nil
 }
 
-func (m *Mirrorer) fetchOne(ctx context.Context, target *url.URL, root bool) ([]*url.URL, error) {
+func (m *Mirrorer) fetchOne(ctx context.Context, target *url.URL, root bool) (fetchResult, error) {
 	if target == nil {
-		return nil, nil
+		return fetchResult{}, nil
 	}
 	target = cloneURL(target)
 	target.Fragment = ""
 	if !m.isAllowed(target) || m.shouldSkip(target) {
-		return nil, nil
+		return fetchResult{}, nil
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
-		return nil, err
+		return fetchResult{}, err
 	}
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request: %w", err)
+		return fetchResult{}, fmt.Errorf("request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.Request != nil && resp.Request.URL != nil {
@@ -191,57 +222,124 @@ func (m *Mirrorer) fetchOne(ctx context.Context, target *url.URL, root bool) ([]
 			m.allowedHosts[finalHost] = struct{}{}
 		} else {
 			if _, ok := m.allowedHosts[finalHost]; !ok {
-				return nil, fmt.Errorf("redirected outside mirrored host to %s", resp.Request.URL.Host)
+				return fetchResult{}, fmt.Errorf("redirected outside mirrored host to %s", resp.Request.URL.Host)
 			}
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status %s", resp.Status)
+		return fetchResult{}, fmt.Errorf("status %s", resp.Status)
 	}
-
-	localRel := localPathFor(target)
+	contentType := resp.Header.Get("Content-Type")
+	kind := detectResourceKind(contentType, target.Path, root)
+	pathType := contentType
+	if normalizedMediaType(pathType) == "" && kind == resourceHTML {
+		pathType = "text/html"
+	}
+	localRel := localPathFor(target, pathType)
 	localAbs := filepath.Join(m.rootDir, localRel)
 	if err := os.MkdirAll(filepath.Dir(localAbs), 0o755); err != nil {
-		return nil, fmt.Errorf("create path %s: %w", filepath.Dir(localAbs), err)
+		return fetchResult{}, fmt.Errorf("create path %s: %w", filepath.Dir(localAbs), err)
 	}
-	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-	ext := strings.ToLower(path.Ext(target.Path))
 	baseURL := target
 	if resp.Request != nil && resp.Request.URL != nil {
 		baseURL = resp.Request.URL
 	}
+	body := io.Reader(resp.Body)
+	if m.limiter != nil {
+		body = m.limiter.Wrap(body)
+	}
 	var links []*url.URL
-	switch {
-	case strings.Contains(contentType, "text/html") || ext == ".html" || ext == ".htm" || (ext == "" && root):
-		data, err := io.ReadAll(resp.Body)
+	switch kind {
+	case resourceHTML:
+		data, err := io.ReadAll(body)
 		if err != nil {
-			return nil, fmt.Errorf("read body: %w", err)
+			return fetchResult{}, fmt.Errorf("read body: %w", err)
 		}
-		processed, found, err := m.processHTML(data, baseURL, localRel)
+		processed, found, err := m.processHTML(data, baseURL, localRel, false)
 		if err != nil {
-			return nil, fmt.Errorf("parse HTML: %w", err)
+			return fetchResult{}, fmt.Errorf("parse HTML: %w", err)
 		}
 		links = found
 		if err := writeFileAtomic(localAbs, processed); err != nil {
-			return nil, fmt.Errorf("save %s: %w", localAbs, err)
+			return fetchResult{}, fmt.Errorf("save %s: %w", localAbs, err)
 		}
-	case strings.Contains(contentType, "text/css") || ext == ".css":
-		data, err := io.ReadAll(resp.Body)
+	case resourceCSS:
+		data, err := io.ReadAll(body)
 		if err != nil {
-			return nil, fmt.Errorf("read body: %w", err)
+			return fetchResult{}, fmt.Errorf("read body: %w", err)
 		}
-		processed, found := m.processCSS(data, baseURL, localRel)
+		processed, found := m.processCSS(data, baseURL, localRel, false)
 		links = found
 		if err := writeFileAtomic(localAbs, processed); err != nil {
-			return nil, fmt.Errorf("save %s: %w", localAbs, err)
+			return fetchResult{}, fmt.Errorf("save %s: %w", localAbs, err)
 		}
 	default:
-		if err := writeStreamAtomic(localAbs, resp.Body); err != nil {
-			return nil, fmt.Errorf("save %s: %w", localAbs, err)
+		if err := writeStreamAtomic(localAbs, body); err != nil {
+			return fetchResult{}, fmt.Errorf("save %s: %w", localAbs, err)
 		}
 	}
+	saved := &savedResource{key: canonicalKey(target), localRel: localRel, baseURL: cloneURL(baseURL), kind: kind}
 	m.logf("saved %s\n", localAbs)
-	return links, nil
+	return fetchResult{links: links, saved: saved}, nil
+}
+
+func detectResourceKind(contentType, urlPath string, root bool) resourceKind {
+	mediaType := normalizedMediaType(contentType)
+	ext := strings.ToLower(path.Ext(urlPath))
+	if mediaType == "text/html" || mediaType == "application/xhtml+xml" || ext == ".html" || ext == ".htm" || (root && mediaType == "" && ext == "") {
+		return resourceHTML
+	}
+	if mediaType == "text/css" || ext == ".css" {
+		return resourceCSS
+	}
+	return resourceBinary
+}
+func (m *Mirrorer) registerSaved(saved *savedResource) {
+	if saved == nil {
+		return
+	}
+	m.paths[saved.key] = saved.localRel
+	m.saved = append(m.saved, *saved)
+}
+func (m *Mirrorer) convertSavedResources() error {
+	for _, saved := range m.saved {
+		if saved.kind == resourceBinary {
+			continue
+		}
+		abs := filepath.Join(m.rootDir, saved.localRel)
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			if saved.key == m.rootKey {
+				return fmt.Errorf("convert root %s: %w", abs, err)
+			}
+			m.logf("skip convert %s: %v\n", abs, err)
+			continue
+		}
+		var processed []byte
+		switch saved.kind {
+		case resourceHTML:
+			processed, _, err = m.processHTML(data, saved.baseURL, saved.localRel, true)
+		case resourceCSS:
+			processed, _ = m.processCSS(data, saved.baseURL, saved.localRel, true)
+		}
+		if err != nil {
+			if saved.key == m.rootKey {
+				return fmt.Errorf("convert root %s: %w", abs, err)
+			}
+			m.logf("skip convert %s: %v\n", abs, err)
+			continue
+		}
+		if string(processed) == string(data) {
+			continue
+		}
+		if err := writeFileAtomic(abs, processed); err != nil {
+			if saved.key == m.rootKey {
+				return fmt.Errorf("convert root %s: %w", abs, err)
+			}
+			m.logf("skip convert %s: %v\n", abs, err)
+		}
+	}
+	return nil
 }
 
 func writeFileAtomic(destination string, data []byte) error {
@@ -296,7 +394,6 @@ func writeStreamAtomic(destination string, r io.Reader) error {
 	ok = true
 	return nil
 }
-
 func (m *Mirrorer) isAllowed(u *url.URL) bool {
 	if u == nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return false
@@ -325,7 +422,7 @@ func canonicalKey(u *url.URL) string {
 }
 func cloneURL(u *url.URL) *url.URL { copy := *u; return &copy }
 func sanitizeHost(host string) string {
-	return strings.NewReplacer(":", "_", "/", "_", `\`, "_").Replace(host)
+	return strings.NewReplacer(":", "_", "/", "_", `\`, `_`).Replace(host)
 }
 func (m *Mirrorer) logf(format string, args ...any) {
 	m.outMu.Lock()
