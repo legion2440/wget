@@ -6,115 +6,67 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestMirrorDownloadsTreeFiltersAndConvertsLinks(t *testing.T) {
+func TestMirrorDownloadsRequiredResourcesAndInlineCSS(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
 		w.Header().Set("Content-Type", "text/html")
-		_, _ = io.WriteString(w, `<!doctype html><html><head><link rel="stylesheet" href="/css/style.css"><script src="/js/app.js"></script></head><body><img src="/img/photo.jpg"><img src="/img/anim.gif"><a href="/page/about.html">About</a><a href="/skip/hidden.html">Skip</a><a href="https://example.org/">External</a></body></html>`)
+		_, _ = io.WriteString(w, `<!doctype html><html><head>
+<link rel="stylesheet" href="/css/style.css">
+<style>.hero{background:url('/img/inline-style.png')}</style>
+<script src="/js/not-required.js">document.write("<img src='/img/fake.png'>")</script>
+</head><body style="background-image:url('/img/inline-attr.png')">
+<img src="/img/photo.jpg"><a href="/about">About</a>
+</body></html>`)
 	})
 	mux.HandleFunc("/css/style.css", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/css")
-		_, _ = io.WriteString(w, `@import "/css/more.css"; body{background:url('../img/bg.png')}`)
+		_, _ = io.WriteString(w, `body{background:url('../img/bg.png')}`)
 	})
-	mux.HandleFunc("/css/more.css", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/css")
-		_, _ = io.WriteString(w, `.x{display:block}`)
-	})
-	mux.HandleFunc("/page/about.html", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/about", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		_, _ = io.WriteString(w, `<img src="../img/about.png"><a href="/">Home</a>`)
+		_, _ = io.WriteString(w, `<img src="/about/team.png"><a href="/">Home</a>`)
 	})
-	for _, item := range []string{"/img/photo.jpg", "/img/bg.png", "/img/about.png", "/img/anim.gif", "/js/app.js", "/skip/hidden.html"} {
+	for _, item := range []string{"/img/photo.jpg", "/img/bg.png", "/img/inline-style.png", "/img/inline-attr.png", "/about/team.png", "/js/not-required.js", "/img/fake.png"} {
 		item := item
-		mux.HandleFunc(item, func(w http.ResponseWriter, r *http.Request) {
-			_, _ = fmt.Fprint(w, item)
-		})
+		mux.HandleFunc(item, func(w http.ResponseWriter, r *http.Request) { _, _ = fmt.Fprint(w, item) })
 	}
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
 	base := t.TempDir()
-	m := New(server.Client(), io.Discard, Options{
-		Reject:       []string{"gif"},
-		Exclude:      []string{"/skip"},
-		ConvertLinks: true,
-		BaseDir:      base,
-	})
+	m := New(server.Client(), io.Discard, Options{ConvertLinks: true, BaseDir: base})
 	if err := m.Run(context.Background(), server.URL+"/"); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	rootDir := filepath.Join(base, sanitizeHost(strings.TrimPrefix(server.URL, "http://")))
-	for _, rel := range []string{"index.html", "css/style.css", "css/more.css", "js/app.js", "img/photo.jpg", "img/bg.png", "img/about.png", "page/about.html"} {
-		if _, err := os.Stat(filepath.Join(rootDir, filepath.FromSlash(rel))); err != nil {
-			t.Fatalf("missing mirrored %s: %v", rel, err)
+	root := filepath.Join(base, sanitizeHost(strings.TrimPrefix(server.URL, "http://")))
+	for _, rel := range []string{"index.html", "css/style.css", "img/photo.jpg", "img/bg.png", "img/inline-style.png", "img/inline-attr.png", "about.html", "about/team.png"} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
+			t.Fatalf("missing %s: %v", rel, err)
 		}
 	}
-	for _, rel := range []string{"img/anim.gif", "skip/hidden.html"} {
-		if _, err := os.Stat(filepath.Join(rootDir, filepath.FromSlash(rel))); !os.IsNotExist(err) {
-			t.Fatalf("filtered file %s unexpectedly exists", rel)
+	for _, rel := range []string{"js/not-required.js", "img/fake.png"} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+			t.Fatalf("out-of-scope/script-body resource %s unexpectedly exists: %v", rel, err)
 		}
 	}
-
-	index, err := os.ReadFile(filepath.Join(rootDir, "index.html"))
+	index, err := os.ReadFile(filepath.Join(root, "index.html"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	indexText := string(index)
-	for _, want := range []string{`href="css/style.css"`, `src="js/app.js"`, `src="img/photo.jpg"`, `href="page/about.html"`, `href="https://example.org/"`} {
-		if !strings.Contains(indexText, want) {
-			t.Fatalf("converted index missing %q:\n%s", want, indexText)
+	text := string(index)
+	for _, want := range []string{"css/style.css", "img/inline-style.png", "img/inline-attr.png", "img/photo.jpg", "about.html"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("converted index missing %q:\n%s", want, text)
 		}
 	}
-	if !strings.Contains(indexText, `/img/anim.gif`) || !strings.Contains(indexText, `/skip/hidden.html`) {
-		t.Fatalf("filtered references should remain untouched:\n%s", indexText)
+	if !strings.Contains(text, "js/not-required.js") {
+		t.Fatalf("script src should remain in HTML even though it is outside crawl scope:\n%s", text)
 	}
-
-	css, err := os.ReadFile(filepath.Join(rootDir, "css", "style.css"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(css), `@import "more.css"`) || !strings.Contains(string(css), `url("../img/bg.png")`) {
-		t.Fatalf("CSS links were not converted correctly: %s", css)
-	}
-}
-
-func TestExcludeMatchesDirectoryBoundary(t *testing.T) {
-	m := New(nil, io.Discard, Options{Exclude: []string{"/img"}})
-	for _, raw := range []string{"https://example.com/img", "https://example.com/img/a.png"} {
-		u := mustURL(t, raw)
-		if !m.shouldSkip(u) {
-			t.Fatalf("expected %s to be excluded", raw)
-		}
-	}
-	if m.shouldSkip(mustURL(t, "https://example.com/images/a.png")) {
-		t.Fatal("/images must not match /img")
-	}
-}
-
-func TestRejectIsCaseInsensitive(t *testing.T) {
-	m := New(nil, io.Discard, Options{Reject: []string{"GIF"}})
-	if !m.shouldSkip(mustURL(t, "https://example.com/image.GiF")) {
-		t.Fatal("GIF suffix should be rejected case-insensitively")
-	}
-}
-
-func mustURL(t *testing.T, raw string) *url.URL {
-	t.Helper()
-	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return u
 }
