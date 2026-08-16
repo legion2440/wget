@@ -95,6 +95,14 @@ With `--mirror`, `-P` is also supported and selects the parent directory for the
 
 `k`/`K` and `M`/`m` suffixes are supported. Throttling is applied while bytes are read, not only corrected after completion.
 
+The same limit can be combined with mirroring:
+
+```bash
+./wget --mirror --rate-limit=700k https://example.com/
+```
+
+The mirror uses one shared limiter, so the limit applies to the **aggregate traffic of all mirror workers**, not separately to each worker.
+
 ### Concurrent input file — `-i`
 
 Create `downloads.txt`:
@@ -111,7 +119,7 @@ Run:
 ./wget -i=downloads.txt
 ```
 
-The files download concurrently. Batch mode deliberately suppresses per-download progress chatter and reports clean `finished <name>` lines plus the final URL list.
+The files download concurrently. Batch mode deliberately suppresses per-download progress chatter. It prints the content-size list first (comma-separated, using `unknown` for chunked responses), then clean `finished <name>` lines and the final URL list.
 
 ### Background mode — `-B`
 
@@ -176,20 +184,21 @@ Directory boundaries are respected: `/img` excludes `/img` and `/img/...`, but n
 
 Downloaded HTML and CSS references are rewritten to local relative paths. External and filtered references remain unchanged.
 
-Extensionless URLs such as `/about` are stored as `about.html`, avoiding the `about` file versus `about/...` directory collision. Query variants use a deterministic short hash in the local filename, so `/?page=1` and `/?page=2` cannot overwrite the same `index.html`.
+Extensionless URLs are mapped using the response MIME type: for example, HTML `/about` becomes `about.html`, `image/png` `/logo` becomes `logo.png`, and JSON `/api/data` becomes `api/data.json`. This avoids file/directory collisions without pretending every extensionless resource is HTML. Query variants use a deterministic short hash in the local filename, so `/?page=1` and `/?page=2` cannot overwrite the same local file.
 
 ## ⚡ Efficiency and resilience
 
 The mirror implementation also targets the audit bonus for speed and effective recursion:
 
 - the root page is validated first;
-- discovered resources are processed by a bounded worker pool (8 workers by default);
+- discovered resources are processed by a bounded worker pool (4 workers by default), balancing concurrency with polite request pressure on public sites;
 - URL scheduling and the visited set are coordinated centrally, avoiding duplicate requests without a shared-map race;
 - duplicate references are requested only once;
 - child request, body-read and filesystem failures are logged as `skip ...` and do not abort the remaining mirror;
 - root failures remain fatal, because there is no valid mirror without the requested root;
 - files are written through temporary files and renamed only after a complete write, so interrupted resources do not look complete;
-- same-site restrictions are preserved after redirects.
+- same-site restrictions are preserved after redirects;
+- when `--rate-limit` is used with `--mirror`, one shared limiter caps aggregate traffic across all workers.
 
 The project remains standard-library-only.
 
@@ -218,15 +227,17 @@ The black-box suite builds the real CLI binary and verifies, using deterministic
 - `-O` + `-P`;
 - chunked/unknown content length;
 - actual `300k` throttling by elapsed time;
-- concurrent and readable `-i` behavior;
+- concurrent and readable `-i` behavior, including size-first comma-separated output and `unknown` chunked sizes;
 - `-B` launcher output and exact `wget-log` shape;
 - HTTP error cleanup;
 - mirror `-P`;
 - recursive mirror and offline link conversion;
+- aggregate `--rate-limit` across concurrent mirror workers;
+- MIME-aware local names for extensionless resources;
 - inline CSS resources;
 - required `a` / `link` / `img` scope without fetching scripts;
 - `--reject=gif` and `-X=/img`;
-- rejected no-op mirror flag combinations.
+- rejection of `-O` with mirror while allowing supported `-P` and `--rate-limit` combinations.
 
 Lower-level mirror tests additionally prove:
 
@@ -236,7 +247,8 @@ Lower-level mirror tests additionally prove:
 - query variants do not overwrite each other;
 - duplicate URLs are fetched once;
 - mirror downloads actually overlap in time;
-- reject matching is case-insensitive and exclude matching respects directory boundaries.
+- reject matching is case-insensitive and exclude matching respects directory boundaries;
+- ASCII-only case folding preserves UTF-8 byte offsets while skipping `<script>`/`<style>` bodies.
 
 Windows cross-compilation can be checked with:
 
@@ -276,6 +288,9 @@ cat wget-log
 ./wget --mirror https://trypap.com/
 ./wget --mirror -X=/img https://trypap.com/
 ./wget --mirror https://theuselessweb.com/
+
+# Supported together: aggregate limit across mirror workers
+./wget --mirror --rate-limit=700k https://example.com/
 ```
 
 The checklist also asks for one additional website of the evaluator's choice.
@@ -309,7 +324,7 @@ wget/
 - Mirror traversal stays on the requested host and also accepts the final host of the initial root redirect.
 - `-R`/`--reject`, `-X`/`--exclude` and `--convert-links` require `--mirror`.
 - `-i` and a positional URL are mutually exclusive.
-- `-O` and `--rate-limit` are rejected with `--mirror` instead of being silently ignored; `-P` is supported for mirror output placement.
+- `-O` is rejected with `--mirror`; `-P` and `--rate-limit` are supported, with mirror rate limiting applied to aggregate worker traffic.
 - Public audit sites can change or disappear independently of this repository; deterministic automated tests therefore do not depend on them.
 
 ## 🧑‍💻 Authors
