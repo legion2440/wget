@@ -45,6 +45,7 @@ func run(ctx context.Context, args []string) error {
 			Reject:       opts.Reject,
 			Exclude:      opts.Exclude,
 			ConvertLinks: opts.ConvertLinks,
+			BaseDir:      opts.OutputDir,
 		})
 		return m.Run(ctx, opts.URL)
 	}

@@ -15,22 +15,21 @@ import (
 
 const timestampLayout = "2006-01-02 15:04:05"
 
-// Options configures one file download.
 type Options struct {
 	OutputName   string
 	OutputDir    string
 	RateLimit    int64
 	ShowProgress bool
+	Quiet        bool
 }
 
-// Result describes a completed download.
 type Result struct {
-	URL   string
-	Path  string
-	Bytes int64
+	URL           string
+	Path          string
+	Bytes         int64
+	ContentLength int64
 }
 
-// Downloader downloads files using a reusable HTTP client.
 type Downloader struct {
 	client *http.Client
 	out    io.Writer
@@ -46,7 +45,6 @@ func New(client *http.Client, out io.Writer) *Downloader {
 	return &Downloader{client: client, out: out}
 }
 
-// Fetch downloads one URL to disk and prints the feedback required by the assignment.
 func (d *Downloader) Fetch(ctx context.Context, rawURL string, opts Options) (Result, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -56,8 +54,10 @@ func (d *Downloader) Fetch(ctx context.Context, rawURL string, opts Options) (Re
 		return Result{}, fmt.Errorf("unsupported URL scheme %q", parsed.Scheme)
 	}
 
-	fmt.Fprintf(d.out, "start at %s\n", time.Now().Format(timestampLayout))
-	fmt.Fprint(d.out, "sending request, awaiting response... ")
+	if !opts.Quiet {
+		fmt.Fprintf(d.out, "start at %s\n", time.Now().Format(timestampLayout))
+		fmt.Fprint(d.out, "sending request, awaiting response... ")
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -65,17 +65,27 @@ func (d *Downloader) Fetch(ctx context.Context, rawURL string, opts Options) (Re
 	}
 	resp, err := d.client.Do(req)
 	if err != nil {
-		fmt.Fprintln(d.out, "request failed")
+		if !opts.Quiet {
+			fmt.Fprintln(d.out, "request failed")
+		}
 		return Result{}, fmt.Errorf("request %s: %w", rawURL, err)
 	}
 	defer resp.Body.Close()
 
-	fmt.Fprintf(d.out, "status %s\n", resp.Status)
+	if !opts.Quiet {
+		fmt.Fprintf(d.out, "status %s\n", resp.Status)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return Result{}, fmt.Errorf("download failed with status %s", resp.Status)
 	}
 
-	fmt.Fprintf(d.out, "content size: %d [%s]\n", resp.ContentLength, roundedSize(resp.ContentLength))
+	if !opts.Quiet {
+		if resp.ContentLength >= 0 {
+			fmt.Fprintf(d.out, "content size: %d [%s]\n", resp.ContentLength, roundedSize(resp.ContentLength))
+		} else {
+			fmt.Fprintln(d.out, "content size: unknown")
+		}
+	}
 
 	filename := opts.OutputName
 	if filename == "" {
@@ -92,7 +102,9 @@ func (d *Downloader) Fetch(ctx context.Context, rawURL string, opts Options) (Re
 		return Result{}, fmt.Errorf("create output directory: %w", err)
 	}
 	destination := filepath.Join(dir, filename)
-	fmt.Fprintf(d.out, "saving file to: %s\n", displayPath(destination))
+	if !opts.Quiet {
+		fmt.Fprintf(d.out, "saving file to: %s\n", displayPath(destination))
+	}
 
 	file, err := os.Create(destination)
 	if err != nil {
@@ -110,7 +122,7 @@ func (d *Downloader) Fetch(ctx context.Context, rawURL string, opts Options) (Re
 	buffer := make([]byte, 32*1024)
 	var downloaded int64
 	var prog *progress
-	if opts.ShowProgress {
+	if opts.ShowProgress && !opts.Quiet {
 		prog = newProgress(d.out, resp.ContentLength)
 	}
 
@@ -143,11 +155,13 @@ func (d *Downloader) Fetch(ctx context.Context, rawURL string, opts Options) (Re
 	completed = true
 	if prog != nil {
 		prog.update(downloaded, true)
+		fmt.Fprintln(d.out)
 	}
-
-	fmt.Fprintf(d.out, "\nDownloaded [%s]\n", rawURL)
-	fmt.Fprintf(d.out, "finished at %s\n", time.Now().Format(timestampLayout))
-	return Result{URL: rawURL, Path: destination, Bytes: downloaded}, nil
+	if !opts.Quiet {
+		fmt.Fprintf(d.out, "Downloaded [%s]\n", rawURL)
+		fmt.Fprintf(d.out, "finished at %s\n", time.Now().Format(timestampLayout))
+	}
+	return Result{URL: rawURL, Path: destination, Bytes: downloaded, ContentLength: resp.ContentLength}, nil
 }
 
 func filenameFromURL(u *url.URL) string {

@@ -5,7 +5,6 @@ import (
 	"strings"
 )
 
-// Options contains the command-line settings supported by the assignment.
 type Options struct {
 	URL             string
 	OutputName      string
@@ -20,8 +19,6 @@ type Options struct {
 	BackgroundChild bool
 }
 
-// Parse parses GNU-wget-like short and long options while keeping the assignment
-// syntax (-O=name, -P=path, -i=file, -R=list, -X=list) convenient.
 func Parse(args []string) (Options, error) {
 	var opts Options
 	var positional []string
@@ -109,6 +106,12 @@ func Parse(args []string) (Options, error) {
 	if (len(opts.Reject) > 0 || len(opts.Exclude) > 0 || opts.ConvertLinks) && !opts.Mirror {
 		return Options{}, fmt.Errorf("-R/--reject, -X/--exclude and --convert-links require --mirror")
 	}
+	if opts.Mirror && opts.OutputName != "" {
+		return Options{}, fmt.Errorf("-O/--output-document cannot be used with --mirror")
+	}
+	if opts.Mirror && opts.RateLimit != "" {
+		return Options{}, fmt.Errorf("--rate-limit cannot be used with --mirror")
+	}
 	return opts, nil
 }
 
@@ -149,8 +152,7 @@ func optionValue(args []string, index int, arg, short, long string) (string, int
 			return value, index, nil
 		}
 		if !strings.HasPrefix(name, "--") && strings.HasPrefix(arg, name) && len(arg) > len(name) {
-			value := strings.TrimPrefix(arg, name)
-			value = strings.TrimPrefix(value, "=")
+			value := strings.TrimPrefix(strings.TrimPrefix(arg, name), "=")
 			if value == "" {
 				return "", index, fmt.Errorf("option %s requires a non-empty value", name)
 			}

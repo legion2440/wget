@@ -7,29 +7,18 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 )
 
-type lockedWriter struct {
-	mu sync.Mutex
-	w  io.Writer
-}
-
-func (w *lockedWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.w.Write(p)
-}
-
-// Batch downloads every URL from a text file concurrently.
 func Batch(ctx context.Context, client *http.Client, out io.Writer, inputFile string, opts Options) error {
 	file, err := os.Open(inputFile)
 	if err != nil {
 		return fmt.Errorf("open input file: %w", err)
 	}
 	defer file.Close()
-
 	var urls []string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -46,44 +35,46 @@ func Batch(ctx context.Context, client *http.Client, out io.Writer, inputFile st
 		return fmt.Errorf("input file contains no URLs")
 	}
 
-	lw := &lockedWriter{w: out}
+	type result struct {
+		url, path string
+		size      int64
+		err       error
+	}
+	results := make(chan result, len(urls))
 	var wg sync.WaitGroup
-	errCh := make(chan error, len(urls))
-	completed := make(chan string, len(urls))
-
 	for _, rawURL := range urls {
 		rawURL := rawURL
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			d := New(client, lw)
-			localOpts := opts
-			localOpts.OutputName = ""
-			localOpts.ShowProgress = false
-			result, err := d.Fetch(ctx, rawURL, localOpts)
-			if err != nil {
-				errCh <- fmt.Errorf("%s: %w", rawURL, err)
-				return
-			}
-			fmt.Fprintf(lw, "finished %s\n", result.Path)
-			completed <- rawURL
+			d := New(client, io.Discard)
+			local := opts
+			local.OutputName = ""
+			local.ShowProgress = false
+			local.Quiet = true
+			r, err := d.Fetch(ctx, rawURL, local)
+			results <- result{url: rawURL, path: r.Path, size: r.ContentLength, err: err}
 		}()
 	}
+	go func() { wg.Wait(); close(results) }()
 
-	wg.Wait()
-	close(errCh)
-	close(completed)
-
+	sizes := make([]int64, 0, len(urls))
 	finished := make([]string, 0, len(urls))
-	for rawURL := range completed {
-		finished = append(finished, rawURL)
-	}
-	fmt.Fprintf(lw, "\nDownload finished:  [%s]\n", strings.Join(finished, " "))
-
 	var errs []string
-	for err := range errCh {
-		errs = append(errs, err.Error())
+	for r := range results {
+		if r.err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", r.url, r.err))
+			continue
+		}
+		sizes = append(sizes, r.size)
+		fmt.Fprintf(out, "finished %s\n", filepath.Base(r.path))
+		finished = append(finished, r.url)
 	}
+	if len(sizes) > 0 {
+		fmt.Fprintf(out, "content size: %v\n", sizes)
+	}
+	sort.Strings(finished)
+	fmt.Fprintf(out, "\nDownload finished:  [%s]\n", strings.Join(finished, " "))
 	if len(errs) > 0 {
 		return fmt.Errorf("%d download(s) failed: %s", len(errs), strings.Join(errs, "; "))
 	}
