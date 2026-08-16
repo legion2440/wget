@@ -1,6 +1,6 @@
 # Wget
 
-A Go implementation of the 01-edu `wget` assignment. It supports file downloads with progress reporting, custom names and directories, rate limiting, background mode, concurrent batch downloads, and recursive website mirroring.
+A Go implementation of the 01-edu `wget` assignment. It supports streamed file downloads, progress reporting, custom output names and directories, rate limiting, background mode, concurrent batch downloads, and resilient concurrent website mirroring.
 
 · [Русская версия](README_RU.md)
 
@@ -8,10 +8,11 @@ A Go implementation of the 01-edu `wget` assignment. It supports file downloads 
 
 - [🚀 Quick start](#-quick-start)
 - [📝 About](#-about)
-- [✨ Features](#-features)
+- [✨ Download features](#-download-features)
 - [🪞 Website mirroring](#-website-mirroring)
+- [⚡ Efficiency and resilience](#-efficiency-and-resilience)
 - [🧪 Tests and verification](#-tests-and-verification)
-- [📋 Audit commands](#-audit-commands)
+- [📋 Official audit commands](#-official-audit-commands)
 - [📁 Project structure](#-project-structure)
 - [⚠️ Notes](#️-notes)
 - [🧑‍💻 Authors](#-authors)
@@ -21,7 +22,8 @@ A Go implementation of the 01-edu `wget` assignment. It supports file downloads 
 ### Requirements
 
 - Go 1.20 or newer
-- no third-party packages
+- GNU Make for the one-command audit target
+- no third-party Go packages
 
 ### Build
 
@@ -35,15 +37,31 @@ go build -o wget .
 ./wget https://assets.01-edu.org/wgetDataSamples/20MB.zip
 ```
 
-The normal download output includes the start and finish time (`yyyy-mm-dd hh:mm:ss`), HTTP status, raw and rounded content size, destination path, downloaded KiB/MiB, percentage, current speed and ETA.
+Normal output includes start/end time in `yyyy-mm-dd hh:mm:ss`, HTTP status, content size, destination path, downloaded KiB/MiB, percentage, speed and ETA.
+
+### One-command verification
+
+```bash
+make audit
+```
+
+This is the recommended evaluator entry point.
 
 ## 📝 About
 
-The project implements the required behavior directly in Go and does not wrap the system `wget` command. Ordinary downloads are streamed to disk, so the complete payload is not kept in memory.
+The project implements the required behavior directly in Go and does not wrap the system `wget`. Downloads are streamed to disk instead of buffering the complete file in memory.
 
-HTTP redirects are followed automatically. A non-`200 OK` response stops the affected download, and an incomplete ordinary download is removed instead of being left as a completed-looking file.
+HTTP redirects are followed. A non-`200 OK` response stops the affected ordinary download. Incomplete ordinary downloads and interrupted mirror resources are not left behind as completed-looking files.
 
-## ✨ Features
+For chunked responses where HTTP does not provide a content length, the program prints:
+
+```text
+content size: unknown
+```
+
+instead of exposing Go's internal `-1` value.
+
+## ✨ Download features
 
 ### Output name — `-O`
 
@@ -51,7 +69,7 @@ HTTP redirects are followed automatically. A non-`200 OK` response stops the aff
 ./wget -O=test_20MB.zip https://assets.01-edu.org/wgetDataSamples/20MB.zip
 ```
 
-Both `-O=name` and `-O name` forms are accepted.
+Both `-O=name` and `-O name` are accepted.
 
 ### Output directory — `-P`
 
@@ -59,7 +77,13 @@ Both `-O=name` and `-O name` forms are accepted.
 ./wget -O=test_20MB.zip -P=~/Downloads/ https://assets.01-edu.org/wgetDataSamples/20MB.zip
 ```
 
-`~` is expanded to the current user's home directory. Missing destination directories are created automatically.
+`~` is expanded and missing directories are created.
+
+With `--mirror`, `-P` is also supported and selects the parent directory for the mirrored host folder:
+
+```bash
+./wget --mirror -P=./mirrors https://example.com/
+```
 
 ### Rate limit — `--rate-limit`
 
@@ -69,7 +93,7 @@ Both `-O=name` and `-O name` forms are accepted.
 ./wget --rate-limit=2M   https://assets.01-edu.org/wgetDataSamples/20MB.zip
 ```
 
-`k`/`K` and `M`/`m` suffixes are supported. The reader is paced while bytes are returned, so transfer time is constrained by the requested limit instead of being corrected only after completion.
+`k`/`K` and `M`/`m` suffixes are supported. Throttling is applied while bytes are read, not only corrected after completion.
 
 ### Concurrent input file — `-i`
 
@@ -87,7 +111,7 @@ Run:
 ./wget -i=downloads.txt
 ```
 
-Each URL is downloaded concurrently in its own goroutine. Empty lines and lines beginning with `#` are ignored. A failed URL is reported without cancelling the other downloads.
+The files download concurrently. Batch mode deliberately suppresses per-download progress chatter and reports clean `finished <name>` lines plus the final URL list.
 
 ### Background mode — `-B`
 
@@ -95,13 +119,13 @@ Each URL is downloaded concurrently in its own goroutine. Empty lines and lines 
 ./wget -B https://assets.01-edu.org/wgetDataSamples/20MB.zip
 ```
 
-The parent process immediately prints:
+The parent immediately prints:
 
 ```text
 Output will be written to "wget-log".
 ```
 
-The detached child continues the download and writes its status output to `wget-log`. The progress bar is disabled in the log so its structure remains readable and audit-friendly.
+The detached child continues the download. `wget-log` contains the audit-required start time, status, size, destination, completed URL and finish time without a progress-bar line or an extra blank separator.
 
 ## 🪞 Website mirroring
 
@@ -109,17 +133,23 @@ The detached child continues the download and writes its status output to `wget-
 ./wget --mirror https://example.com/
 ```
 
-A mirror is stored in a directory named after the site host. The crawler recursively follows same-site references, tracks visited URLs to avoid cycles, and reproduces URL paths in the local filesystem.
-
-The required HTML references are supported:
+The mirror is stored under a folder named after the host. The assignment-required references are followed:
 
 - `a[href]`
 - `link[href]`
 - `img[src]`
 
-`script[src]` is also downloaded to improve offline behavior. CSS `url(...)` and quoted `@import` references are followed as well.
+CSS resources are also discovered through:
 
-`data:`, `mailto:`, `javascript:` and `tel:` references are ignored.
+- external `.css` files;
+- `url(...)`;
+- quoted `@import`;
+- inline `<style>...</style>` blocks;
+- inline `style="..."` attributes.
+
+`script[src]` is intentionally **not** added to the crawl scope because the assignment explicitly names `a`, `link` and `img`. Script bodies are skipped by the HTML scanner, so strings such as `document.write("<img ...>")` do not create false resource downloads.
+
+References using `data:`, `mailto:`, `javascript:` and `tel:` are ignored.
 
 ### Reject file types — `-R` / `--reject`
 
@@ -128,7 +158,7 @@ The required HTML references are supported:
 ./wget --mirror --reject=gif https://example.com/
 ```
 
-Suffix matching is case-insensitive and happens before the resource request.
+Suffix matching is case-insensitive and happens before scheduling the request.
 
 ### Exclude directories — `-X` / `--exclude`
 
@@ -138,53 +168,75 @@ Suffix matching is case-insensitive and happens before the resource request.
 
 Directory boundaries are respected: `/img` excludes `/img` and `/img/...`, but not `/images`.
 
-### Offline links — `--convert-links`
+### Convert links — `--convert-links`
 
 ```bash
 ./wget --mirror --convert-links https://example.com/
 ```
 
-References in downloaded HTML and CSS are converted to relative local paths. External and filtered references remain unchanged.
+Downloaded HTML and CSS references are rewritten to local relative paths. External and filtered references remain unchanged.
+
+Extensionless URLs such as `/about` are stored as `about.html`, avoiding the `about` file versus `about/...` directory collision. Query variants use a deterministic short hash in the local filename, so `/?page=1` and `/?page=2` cannot overwrite the same `index.html`.
+
+## ⚡ Efficiency and resilience
+
+The mirror implementation also targets the audit bonus for speed and effective recursion:
+
+- the root page is validated first;
+- discovered resources are processed by a bounded worker pool (8 workers by default);
+- URL scheduling and the visited set are coordinated centrally, avoiding duplicate requests without a shared-map race;
+- duplicate references are requested only once;
+- child request, body-read and filesystem failures are logged as `skip ...` and do not abort the remaining mirror;
+- root failures remain fatal, because there is no valid mirror without the requested root;
+- files are written through temporary files and renamed only after a complete write, so interrupted resources do not look complete;
+- same-site restrictions are preserved after redirects.
+
+The project remains standard-library-only.
 
 ## 🧪 Tests and verification
 
-For the evaluator, the shortest automated path is one command:
+For the evaluator, run:
 
 ```bash
 make audit
 ```
 
-It checks formatting, runs `go vet`, executes the full unit and black-box test suite, and performs a final production build. The black-box tests compile the real `wget` binary and invoke it as a CLI against deterministic local HTTP servers, so they verify user-visible behavior rather than only internal functions.
+It performs:
 
-Plain Go tests are also sufficient for the functional automated suite:
-
-```bash
-go test ./... -count=1 -v
-```
-
-The automated audit covers:
-
-- normal file download and downloaded content;
-- start/end timestamp format, HTTP status, content length, destination and 100% progress output;
-- `-O` together with `-P`;
-- actual `300k` rate throttling by elapsed transfer time;
-- concurrent `-i` downloads using deliberately delayed endpoints;
-- `-B`, detached completion and the required `wget-log` structure;
-- non-`200 OK` handling without leaving a false completed file;
-- recursive website mirroring;
-- `--convert-links` with HTML, CSS, image and JavaScript resources;
-- `--reject=gif`;
-- `-X=/img`.
-
-The lower-level tests additionally cover assignment CLI syntax, redirects, rate parsing for `300k`, `700k`, `2M` and `1.5M`, partial batch failures, exclusion boundaries and HTML/CSS link handling.
-
-Useful individual checks:
-
-```bash
-go test -race ./...
+```text
+gofmt check
 go vet ./...
+go test ./... -count=1 -v
+go test -race ./... -count=1
 go build -o wget .
 ```
+
+The black-box suite builds the real CLI binary and verifies, using deterministic local HTTP servers:
+
+- normal download contents and required output fields;
+- timestamp format;
+- `-O` + `-P`;
+- chunked/unknown content length;
+- actual `300k` throttling by elapsed time;
+- concurrent and readable `-i` behavior;
+- `-B` launcher output and exact `wget-log` shape;
+- HTTP error cleanup;
+- mirror `-P`;
+- recursive mirror and offline link conversion;
+- inline CSS resources;
+- required `a` / `link` / `img` scope without fetching scripts;
+- `--reject=gif` and `-X=/img`;
+- rejected no-op mirror flag combinations.
+
+Lower-level mirror tests additionally prove:
+
+- a broken child response does not abort healthy siblings;
+- a partial broken resource is removed;
+- extensionless page/resource directory collisions are avoided;
+- query variants do not overwrite each other;
+- duplicate URLs are fetched once;
+- mirror downloads actually overlap in time;
+- reject matching is case-insensitive and exclude matching respects directory boundaries.
 
 Windows cross-compilation can be checked with:
 
@@ -192,15 +244,9 @@ Windows cross-compilation can be checked with:
 GOOS=windows GOARCH=amd64 go build -o wget.exe .
 ```
 
-## 📋 Audit commands
+## 📋 Official audit commands
 
-`make audit` automates everything that can be tested deterministically without relying on third-party websites. The official checklist also asks the evaluator to try live public URLs; those remain manual because the sites can disappear or change independently of this project.
-
-Build once for the live checks:
-
-```bash
-go build -o wget .
-```
+`make audit` covers everything that can be tested deterministically. The official checklist also uses live third-party URLs, so run these before the evaluation if those sites are available.
 
 ### Functional
 
@@ -232,7 +278,7 @@ cat wget-log
 ./wget --mirror https://theuselessweb.com/
 ```
 
-The audit also asks the evaluator to mirror one additional site of their choice.
+The checklist also asks for one additional website of the evaluator's choice.
 
 ## 📁 Project structure
 
@@ -240,25 +286,15 @@ The audit also asks the evaluator to mirror one additional site of their choice.
 wget/
 ├── internal/
 │   ├── background/
-│   │   ├── background.go
-│   │   ├── background_unix.go
-│   │   └── background_windows.go
 │   ├── cli/
-│   │   ├── options.go
-│   │   └── options_test.go
 │   ├── download/
-│   │   ├── batch.go
-│   │   ├── batch_test.go
-│   │   ├── downloader.go
-│   │   ├── downloader_test.go
-│   │   ├── progress.go
-│   │   └── ratelimit.go
 │   └── mirror/
 │       ├── css.go
 │       ├── html.go
 │       ├── mirror.go
 │       ├── mirror_test.go
-│       └── path.go
+│       ├── path.go
+│       └── traversal_test.go
 ├── .gitignore
 ├── Makefile
 ├── README.md
@@ -270,11 +306,11 @@ wget/
 
 ## ⚠️ Notes
 
-- Mirror traversal stays on the requested host and also accepts the final host of the initial HTTP redirect.
-- Query strings are part of URL deduplication; local storage follows the URL path.
+- Mirror traversal stays on the requested host and also accepts the final host of the initial root redirect.
 - `-R`/`--reject`, `-X`/`--exclude` and `--convert-links` require `--mirror`.
 - `-i` and a positional URL are mutually exclusive.
-- Public audit sites may change independently of this repository, so automated tests do not depend on them.
+- `-O` and `--rate-limit` are rejected with `--mirror` instead of being silently ignored; `-P` is supported for mirror output placement.
+- Public audit sites can change or disappear independently of this repository; deterministic automated tests therefore do not depend on them.
 
 ## 🧑‍💻 Authors
 
