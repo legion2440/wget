@@ -27,6 +27,7 @@ vet:
 	go vet ./...
 
 build:
+	rm -f wget wget.exe
 	go build -o $(BINARY) .
 
 clean:
