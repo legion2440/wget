@@ -29,6 +29,10 @@ vet:
 build:
 	rm -f wget wget.exe
 	go build -o $(BINARY) .
+ifeq ($(OS),Windows_NT)
+	@printf '%s\n' '#!/usr/bin/env sh' 'MSYS2_ARG_CONV_EXCL="-X=;--exclude=" exec "$$(dirname "$$0")/wget.exe" "$$@"' > wget
+	@chmod +x wget
+endif
 
 clean:
 	rm -f wget wget.exe wget-log
