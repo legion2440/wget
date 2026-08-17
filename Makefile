@@ -1,6 +1,9 @@
 .PHONY: audit test race vet fmt-check build clean
 
 BINARY := wget
+ifeq ($(OS),Windows_NT)
+BINARY := wget.exe
+endif
 
 audit: fmt-check vet test race build
 	@echo "audit: all automated checks passed"
@@ -27,4 +30,4 @@ build:
 	go build -o $(BINARY) .
 
 clean:
-	rm -f $(BINARY) $(BINARY).exe wget-log
+	rm -f wget wget.exe wget-log
