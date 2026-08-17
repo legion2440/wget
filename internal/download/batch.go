@@ -24,6 +24,7 @@ type batchEvent struct {
 	index     int
 	url, path string
 	size      int64
+	metadata  Metadata
 	err       error
 }
 
@@ -62,12 +63,13 @@ func Batch(ctx context.Context, client *http.Client, out io.Writer, inputFile st
 			local.OutputName = ""
 			local.ShowProgress = false
 			local.Quiet = true
-			parentMetadata := local.OnMetadata
 			local.OnMetadata = func(md Metadata) {
-				if parentMetadata != nil {
-					parentMetadata(md)
+				events <- batchEvent{
+					kind:     batchMetadata,
+					index:    index,
+					size:     md.ContentLength,
+					metadata: md,
 				}
-				events <- batchEvent{kind: batchMetadata, index: index, size: md.ContentLength}
 			}
 			r, err := d.Fetch(ctx, rawURL, local)
 			events <- batchEvent{kind: batchFinished, index: index, url: rawURL, path: r.Path, err: err}
@@ -112,6 +114,9 @@ func Batch(ctx context.Context, client *http.Client, out io.Writer, inputFile st
 	for event := range events {
 		switch event.kind {
 		case batchMetadata:
+			if opts.OnMetadata != nil {
+				opts.OnMetadata(event.metadata)
+			}
 			if !metadataSeen[event.index] {
 				metadataSeen[event.index] = true
 				resolvedMetadata++
