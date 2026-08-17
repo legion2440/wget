@@ -15,12 +15,19 @@ import (
 
 const timestampLayout = "2006-01-02 15:04:05"
 
+type Metadata struct {
+	URL           string
+	Path          string
+	ContentLength int64
+}
+
 type Options struct {
 	OutputName   string
 	OutputDir    string
 	RateLimit    int64
 	ShowProgress bool
 	Quiet        bool
+	OnMetadata   func(Metadata)
 }
 
 type Result struct {
@@ -118,6 +125,10 @@ func (d *Downloader) Fetch(ctx context.Context, rawURL string, opts Options) (Re
 		}
 	}()
 
+	if opts.OnMetadata != nil {
+		opts.OnMetadata(Metadata{URL: rawURL, Path: destination, ContentLength: resp.ContentLength})
+	}
+
 	reader := newRateLimitedReader(resp.Body, opts.RateLimit)
 	buffer := make([]byte, 32*1024)
 	var downloaded int64
@@ -191,8 +202,7 @@ func expandHome(dir string) (string, error) {
 		if dir == "" {
 			return "", nil
 		}
-		home, err := os.UserHomeDir()
-		return home, err
+		return os.UserHomeDir()
 	}
 	if strings.HasPrefix(dir, "~/") || strings.HasPrefix(dir, `~\`) {
 		home, err := os.UserHomeDir()
