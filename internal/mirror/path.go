@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -17,21 +16,26 @@ func localPathFor(u *url.URL, contentType string) string {
 	var cleaned string
 	switch {
 	case urlPath == "" || urlPath == "/":
-		cleaned = "index" + preferredExtension(mediaType)
-		if cleaned == "index" && mediaType == "" {
-			cleaned = "index.html"
+		ext := preferredExtension(mediaType)
+		if ext == "" {
+			ext = ".html"
 		}
+		cleaned = "index" + ext
 	case strings.HasSuffix(urlPath, "/"):
 		dir := strings.TrimPrefix(path.Clean("/"+urlPath), "/")
 		ext := preferredExtension(mediaType)
-		if ext == "" && mediaType == "" {
+		if ext == "" {
 			ext = ".html"
 		}
 		cleaned = path.Join(dir, "index"+ext)
 	default:
 		cleaned = strings.TrimPrefix(path.Clean("/"+urlPath), "/")
 		if path.Ext(cleaned) == "" {
-			cleaned += preferredExtension(mediaType)
+			ext := preferredExtension(mediaType)
+			if ext == "" {
+				ext = ".bin"
+			}
+			cleaned += ext
 		}
 	}
 	if cleaned == "" || cleaned == "." {
@@ -56,10 +60,34 @@ func normalizedMediaType(contentType string) string {
 
 func preferredExtension(mediaType string) string {
 	switch mediaType {
+	case "":
+		return ""
 	case "text/html", "application/xhtml+xml":
 		return ".html"
 	case "text/css":
 		return ".css"
+	case "text/plain":
+		return ".txt"
+	case "text/csv":
+		return ".csv"
+	case "application/javascript", "text/javascript":
+		return ".js"
+	case "application/json":
+		return ".json"
+	case "application/xml", "text/xml":
+		return ".xml"
+	case "application/pdf":
+		return ".pdf"
+	case "application/zip":
+		return ".zip"
+	case "application/gzip", "application/x-gzip":
+		return ".gz"
+	case "application/x-tar":
+		return ".tar"
+	case "application/wasm":
+		return ".wasm"
+	case "application/octet-stream":
+		return ".bin"
 	case "image/png":
 		return ".png"
 	case "image/jpeg":
@@ -68,27 +96,38 @@ func preferredExtension(mediaType string) string {
 		return ".gif"
 	case "image/svg+xml":
 		return ".svg"
-	case "application/javascript", "text/javascript":
-		return ".js"
-	case "application/json":
+	case "image/webp":
+		return ".webp"
+	case "image/avif":
+		return ".avif"
+	case "image/x-icon", "image/vnd.microsoft.icon":
+		return ".ico"
+	case "font/woff", "application/font-woff":
+		return ".woff"
+	case "font/woff2":
+		return ".woff2"
+	case "font/ttf":
+		return ".ttf"
+	case "font/otf":
+		return ".otf"
+	case "application/vnd.ms-fontobject":
+		return ".eot"
+	case "audio/mpeg":
+		return ".mp3"
+	case "audio/ogg":
+		return ".ogg"
+	case "video/mp4":
+		return ".mp4"
+	case "video/webm":
+		return ".webm"
+	}
+	if strings.HasSuffix(mediaType, "+json") {
 		return ".json"
-	case "text/plain":
-		return ".txt"
 	}
-	if mediaType == "" {
-		return ""
+	if strings.HasSuffix(mediaType, "+xml") {
+		return ".xml"
 	}
-	exts, err := mime.ExtensionsByType(mediaType)
-	if err != nil || len(exts) == 0 {
-		return ""
-	}
-	sort.Slice(exts, func(i, j int) bool {
-		if len(exts[i]) == len(exts[j]) {
-			return exts[i] < exts[j]
-		}
-		return len(exts[i]) < len(exts[j])
-	})
-	return exts[0]
+	return ".bin"
 }
 
 func addQuerySuffix(rel, query string) string {
