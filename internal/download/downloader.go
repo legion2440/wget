@@ -166,7 +166,6 @@ func (d *Downloader) Fetch(ctx context.Context, rawURL string, opts Options) (Re
 	completed = true
 	if prog != nil {
 		prog.update(downloaded, true)
-		fmt.Fprintln(d.out)
 	}
 	if !opts.Quiet {
 		fmt.Fprintf(d.out, "Downloaded [%s]\n", rawURL)

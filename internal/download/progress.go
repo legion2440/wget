@@ -12,6 +12,7 @@ type progress struct {
 	total     int64
 	started   time.Time
 	lastPrint time.Time
+	lastWidth int
 }
 
 func newProgress(out io.Writer, total int64) *progress {
@@ -33,6 +34,7 @@ func (p *progress) update(downloaded int64, force bool) {
 	speed := float64(downloaded) / elapsed
 	speedText := formatRate(speed)
 
+	var line string
 	if p.total > 0 {
 		percent := float64(downloaded) * 100 / float64(p.total)
 		if percent > 100 {
@@ -48,14 +50,26 @@ func (p *progress) update(downloaded int64, force bool) {
 			filled = width
 		}
 		bar := strings.Repeat("=", filled) + strings.Repeat(" ", width-filled)
-		fmt.Fprintf(p.out, "\r %s / %s [%s] %6.2f%% %s %s",
+		line = fmt.Sprintf(" %s / %s [%s] %6.2f%% %s %s",
 			formatBinary(downloaded), formatBinary(p.total), bar, percent, speedText, formatETA(remaining))
 	} else {
-		fmt.Fprintf(p.out, "\r %s downloaded %s", formatBinary(downloaded), speedText)
+		line = fmt.Sprintf(" %s downloaded %s", formatBinary(downloaded), speedText)
 	}
+	p.writeLine(line, force)
+}
+
+func (p *progress) writeLine(line string, force bool) {
+	padding := 0
+	if p.lastWidth > len(line) {
+		padding = p.lastWidth - len(line)
+	}
+	fmt.Fprintf(p.out, "\r%s%s", line, strings.Repeat(" ", padding))
 	if force {
 		fmt.Fprintln(p.out)
+		p.lastWidth = 0
+		return
 	}
+	p.lastWidth = len(line)
 }
 
 func formatBinary(bytes int64) string {
