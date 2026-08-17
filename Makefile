@@ -2,7 +2,7 @@
 
 BINARY := wget
 ifeq ($(OS),Windows_NT)
-BINARY := wget.exe
+BINARY := wget-bin.exe
 endif
 
 audit: fmt-check vet test race build
@@ -27,12 +27,12 @@ vet:
 	go vet ./...
 
 build:
-	rm -f wget wget.exe
+	rm -f wget wget.exe wget-bin.exe
 	go build -o $(BINARY) .
 ifeq ($(OS),Windows_NT)
-	@printf '%s\n' '#!/usr/bin/env sh' 'MSYS2_ARG_CONV_EXCL="-X=;--exclude=" exec "$$(dirname "$$0")/wget.exe" "$$@"' > wget
+	@printf '%s\n' '#!/usr/bin/env sh' 'MSYS2_ARG_CONV_EXCL="-X=;--exclude=" exec "$$(dirname "$$0")/wget-bin.exe" "$$@"' > wget
 	@chmod +x wget
 endif
 
 clean:
-	rm -f wget wget.exe wget-log
+	rm -f wget wget.exe wget-bin.exe wget-log
